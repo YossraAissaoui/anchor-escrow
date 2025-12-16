@@ -1,114 +1,260 @@
 import * as anchor from "@coral-xyz/anchor";
 import { Program } from "@coral-xyz/anchor";
 import { Escrow } from "../target/types/escrow";
-import { PublicKey } from "@solana/web3.js";
-import { program } from "@coral-xyz/anchor/dist/cjs/native/system";
+import { PublicKey, Keypair, SystemProgram } from "@solana/web3.js";
+import * as spl from "@solana/spl-token";
+import { assert } from "chai";
+import { BN } from "bn.js";
 
-/*
-describe("escrow", () => {
-  // Configure the client to use the local cluster.
-  anchor.setProvider(anchor.AnchorProvider.env());
+describe("Escrow Tests", () => {
+  // Configure the client to use the local cluster
+  const provider = anchor.AnchorProvider.env();
+  anchor.setProvider(provider);
 
-  const program = anchor.workspace.escrow as Program<Escrow>;
+  const program = anchor.workspace.Escrow as Program<Escrow>;
 
-  it("Is initialized!", async () => {
-    // Add your test here.
-    const tx = await program.methods.initialize().rpc();
-    console.log("Your transaction signature", tx);
-  });
-});
-*/
+  // Tokens
+  let tokenA: PublicKey; // example: USDC
+  let tokenB: PublicKey; // example: USDT
 
-describe("Test", () => {
-  // Define the accounts to use.
-  
-  // tokens
-  let tokenA = PublicKey; // example: USDC
-  let tokenB = PublicKey; // example: USDT
+  // Accounts
+  let escrow: PublicKey; // stores the exchange information
+  let guarantyAccount: PublicKey; // stores the initializer's token_A
 
-  // accounts
-  let escrow = PublicKey;
-  let guaranty = PublicKey; // where the funds of Tokens A are held
+  /* 
+   The initializer user will be our wallet
+   */
+  let initializer = provider.wallet as anchor.Wallet;
+  let initializerTokenAccountA: PublicKey; // token account associated with initializer and Token A
 
-  let initializer = program.provider.publicKey; 
-  let initializerTokenA = PublicKey;
-  let id = Date.now().toString();  // identifier of the escrow (timestamp)
+  // Escrow ID (timestamp)
+  let id = Date.now().toString();
 
-  // found PDA for escrow account
+  /*
+  Create all necessary accounts that must exist before
+  executing our instruction
+   */
   before(async () => {
-    [escrow] = web3.PublicKey.findProgramAddressSync(
+    // Find PDA address for the escrow account
+    // THIS DOES NOT CREATE THE ACCOUNT
+    [escrow] = PublicKey.findProgramAddressSync(
       [initializer.publicKey.toBuffer(), Buffer.from(id)],
       program.programId
     );
-    console.log("Escrow PDA: ", escrow.toBase58());
+    console.log("Escrow account: ", escrow.toBase58());
 
-    // create mint for Token A
+    // Find PDA address for the guaranty account
+    [guarantyAccount] = PublicKey.findProgramAddressSync(
+      [escrow.toBuffer()],
+      program.programId
+    );
+    console.log("Guaranty account: ", guarantyAccount.toBase58());
+
+    // Create token A
     tokenA = await spl.createMint(
-      program.provider.connection, // solana connection
-      initializer,                 // the fees payer
-      initializer.publicKey,       // mint authority
-      initializer.publicKey,       // freeze authority
-      2                            // decimals
+      provider.connection,        // connection to Solana
+      (initializer as any).payer, // who pays the fees
+      initializer.publicKey,      // mint authority
+      initializer.publicKey,      // freeze authority
+      2                           // token decimals
     );
     console.log("Token A: ", tokenA.toBase58());
 
-     // create mint for Token B
+    // Create token B
     tokenB = await spl.createMint(
-      program.provider.connection, // solana connection
-      initializer,                 // the fees payer
-      initializer.publicKey,       // mint authority
-      initializer.publicKey,       // freeze authority
-      2                            // decimals
+      provider.connection,        // connection to Solana
+      (initializer as any).payer, // who pays the fees
+      initializer.publicKey,      // mint authority
+      initializer.publicKey,      // freeze authority
+      2                           // token decimals
     );
     console.log("Token B: ", tokenB.toBase58());
 
-    // create token account for Token A
-    initializerTokenA = await spl.getOrCreateAssociatedTokenAccount(
-      program.provider.connection, // solana connection
-      initializer,                 // the fees payer
-      tokenA,                      // tokens stored in the account
-      initializer.publicKey        // owner
+    // Create associated token account for initializer and token A
+    initializerTokenAccountA = await spl.createAssociatedTokenAccount(
+      provider.connection,        // network connection
+      (initializer as any).payer, // pays the fees
+      tokenA,                     // tokens stored in the account
+      initializer.publicKey.      // token owner
     );
-    console.log("Initializer Token A Account: ", initializerTokenA.address.toBase58());
+    console.log("Initializer Token A account: ", initializerTokenAccountA.toBase58());
 
-    // tranfer Token A to guaranty account
-    /* initializer must have enough balance of Token A before running this test
-    so you can mint tokens A to account associated with initializer.publicKey */ 
+    /*
+    Our first instruction transfers token A to the guaranty account
+    The initializer must possess token A in their token account, so
+    we mint token A to the associated token account of the initializer and token A
+    */
     await spl.mintTo(
-      program.provider.connection, // solana connection
-      initializer,                 // the fees payer
-      tokenA,                      // mint
-      initializerTokenA,           // deposit account
-      initializer,                 // mint authority
-      100000                       // amount (in decimals)
+      provider.connection,      // connection to Solana
+      (initializer as any).payer, // who pays the fees
+      tokenA,                     // token to mint
+      initializerTokenAccountA,   // where to deposit them
+      initializer.publicKey,      // mint authority
+      100000 // amount to mint (expressed in decimals: 100000 = 1000.00 with 2 decimals)
     );
- });
 
-   //-------------------------- Tests --------------------------//
-    it("An escrow is initialized", async () => {
-      // amount associated to tokens exchanged
-       const amountTokenA = new anchor.BN(100); // 100 tokens of A
-       const amountTokenB = new anchor.BN(95);  // 95 tokens of B
+    console.log("Minted 1000.00 Token A to initializer");
+  });
 
-       // call instruction
-       let txHash = await program.methods
-          .initialize(id, amountTokenA, amountTokenB)
-          .accounts({
-            escrow: escrow,
-            initializer: initializer.publicKey,
-            initializerTokenA: initializerTokenA,
-            guaranty: guaranty,
-            tokenA: tokenA,
-            tokenB: tokenB,
-          })
-          .signers([initializer])
-          .rpc();
+  //=============================================================================
+  // TESTS
+  //=============================================================================
 
-          // confirm transaction
-          await program.connection.confirmTransaction(txHash);
-          // verify if the amount has been deposited into the guarantee account
-          let deposit = (await.spl.getAccount(program.connection, guaranty)).amount;
-          // assert
-          assert.equal(amountTokenA.toNumber() * 10 ** 2, deposit);
-     });
+  it("Initializes an Escrow", async () => {
+    // Amounts associated with the token exchange
+    const amountTokenA = new BN(100); // 100 token A
+    const amountTokenB = new BN(95); // 95 token B
+
+    console.log("\n--- Initializing Escrow ---");
+    console.log("Amount Token A:", amountTokenA.toString());
+    console.log("Amount Token B:", amountTokenB.toString());
+
+    // Call the instruction
+    const txHash = await program.methods
+      .initialize(id, amountTokenA, amountTokenB)
+      .accounts({
+        escrow: escrow,
+        initializer: initializer.publicKey,
+        initializerTokenAAccount: initializerTokenAccountA,
+        guarantyAccount: guarantyAccount,
+        tokenA: tokenA,
+        tokenB: tokenB,
+        tokenProgram: spl.TOKEN_PROGRAM_ID,
+        systemProgram: SystemProgram.programId,
+        rent: anchor.web3.SYSVAR_RENT_PUBKEY,
+      })
+      .rpc();
+
+    console.log("Transaction signature:", txHash);
+
+    // Confirm the transaction
+    await provider.connection.confirmTransaction(txHash);
+
+    // Verify that the amount was deposited in the guaranty account
+    const guarantyAccountInfo = await spl.getAccount(
+      provider.connection,
+      guarantyAccount
+    );
+    const deposit = guarantyAccountInfo.amount;
+
+    console.log("Deposit in guaranty account:", deposit.toString());
+
+    // Assert - amount should be amountTokenA * 10^decimals
+    // 100 * 10^2 = 10000
+    const expectedDeposit = amountTokenA.toNumber() * 10 ** 2;
+    assert.equal(Number(deposit), expectedDeposit);
+
+    console.log("✅ Escrow initialized successfully!");
+    console.log(`✅ ${deposit} tokens locked in guaranty account`);
+  });
+
+  it("Finalizes the Escrow", async () => {
+    console.log("\n--- Finalizing Escrow ---");
+
+    // Create a taker (Person B who will accept the trade)
+    const taker = Keypair.generate();
+    console.log("Taker public key:", taker.publicKey.toBase58());
+
+    // Airdrop SOL to taker for transaction fees
+    const airdropSignature = await provider.connection.requestAirdrop(
+      taker.publicKey,
+      2 * anchor.web3.LAMPORTS_PER_SOL
+    );
+    await provider.connection.confirmTransaction(airdropSignature);
+    console.log("Airdropped 2 SOL to taker");
+
+    // Create taker's token A account (where they'll receive token A)
+    const takerTokenAccountA = await spl.createAssociatedTokenAccount(
+      provider.connection,
+      taker,
+      tokenA,
+      taker.publicKey
+    );
+    console.log("Taker Token A account:", takerTokenAccountA.toBase58());
+
+    // Create taker's token B account (where they have token B)
+    const takerTokenAccountB = await spl.createAssociatedTokenAccount(
+      provider.connection,
+      taker,
+      tokenB,
+      taker.publicKey
+    );
+    console.log("Taker Token B account:", takerTokenAccountB.toBase58());
+
+    // Mint token B to taker (they need 95 token B to accept the trade)
+    // 95 * 10^2 = 9500
+    await spl.mintTo(
+      provider.connection,
+      taker,
+      tokenB,
+      takerTokenAccountB,
+      initializer.publicKey,
+      9500 // 95.00 with 2 decimals
+    );
+    console.log("Minted 95.00 Token B to taker");
+
+    // Create initializer's token B account (where they'll receive token B)
+    const initializerTokenAccountB = await spl.getOrCreateAssociatedTokenAccount(
+      provider.connection,
+      (initializer as any).payer,
+      tokenB,
+      initializer.publicKey
+    );
+    console.log("Initializer Token B account:", initializerTokenAccountB.address.toBase58());
+
+    // Get balances before finalize
+    const takerTokenBBefore = await spl.getAccount(provider.connection, takerTokenAccountB);
+    const initializerTokenABefore = await spl.getAccount(provider.connection, initializerTokenAccountA);
+    
+    console.log("\nBalances before finalize:");
+    console.log("Taker Token B:", takerTokenBBefore.amount.toString());
+    console.log("Initializer Token A:", initializerTokenABefore.amount.toString());
+
+    // Call finalize instruction
+    const txHash = await program.methods
+      .finalize()
+      .accounts({
+        escrow: escrow,
+        guarantyAccount: guarantyAccount,
+        taker: taker.publicKey,
+        initializer: initializer.publicKey,
+        initializerTokenAccountB: initializerTokenAccountB.address,
+        takerTokenAccountB: takerTokenAccountB,
+        takerTokenAccountA: takerTokenAccountA,
+        tokenProgram: spl.TOKEN_PROGRAM_ID,
+      })
+      .signers([taker])
+      .rpc();
+
+    console.log("\nFinalize transaction signature:", txHash);
+
+    // Confirm transaction
+    await provider.connection.confirmTransaction(txHash);
+
+    // Get balances after finalize
+    const takerTokenAAfter = await spl.getAccount(provider.connection, takerTokenAccountA);
+    const takerTokenBAfter = await spl.getAccount(provider.connection, takerTokenAccountB);
+    const initializerTokenBAfter = await spl.getAccount(provider.connection, initializerTokenAccountB.address);
+
+    console.log("\nBalances after finalize:");
+    console.log("Taker Token A:", takerTokenAAfter.amount.toString());
+    console.log("Taker Token B:", takerTokenBAfter.amount.toString());
+    console.log("Initializer Token B:", initializerTokenBAfter.amount.toString());
+
+    // Assertions
+    assert.equal(Number(takerTokenAAfter.amount), 10000); // 100 * 10^2
+    assert.equal(Number(initializerTokenBAfter.amount), 9500); // 95 * 10^2
+
+    console.log("\n✅ Escrow finalized successfully!");
+    console.log("✅ Taker received 100.00 Token A");
+    console.log("✅ Initializer received 95.00 Token B");
+
+    // Verify guaranty account is closed
+    try {
+      await spl.getAccount(provider.connection, guarantyAccount);
+      assert.fail("Guaranty account should be closed");
+    } catch (error) {
+      console.log("✅ Guaranty account closed successfully");
+    }
+  });
 });
